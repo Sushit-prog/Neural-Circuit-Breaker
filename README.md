@@ -65,8 +65,12 @@ curl -X POST http://localhost:8000/v1/check \
 
 Response (blocked by deep classifier):
 ```json
-{"status": "blocked", "circuit_state": "CLOSED", "detail": "Deep classifier flagged as prompt injection (score: 0.9200)", "detector": "deep_classifier"}
+{"status": "blocked", "circuit_state": "CLOSED", "detail": "Deep classifier flagged as prompt injection (score: 0.9200)", "detector": "deep_classifier", "fallback": {"message": "This request could not be processed safely. Please rephrase and try again.", "strategy": "static", "fallback_triggered": true}}
 ```
+
+The `fallback` field is always present on blocked responses and contains a safe,
+usable message the caller can display or act on — blocked requests never return
+a bare rejection.
 
 ### `GET /v1/circuit/{circuit_id}/state`
 
@@ -102,6 +106,11 @@ All settings are loaded from `.env` (see `.env.example`):
 | `DEEP_CLASSIFIER_ENABLED` | `True` | Enable ML deep classifier (set `False` for fast-filter-only mode) |
 | `DEEP_CLASSIFIER_MODEL` | `protectai/deberta-v3-base-prompt-injection-v2` | HuggingFace model ID |
 | `DEEP_CLASSIFIER_THRESHOLD` | `0.5` | Score above this = unsafe |
+| `FALLBACK_STRATEGY` | `static` | `static` (fixed message) or `model` (call Groq/OpenRouter) |
+| `FALLBACK_STATIC_MESSAGE` | _(safe default)_ | Message returned when strategy is `static` |
+| `FALLBACK_MODEL_PROVIDER` | `groq` | `groq` or `openrouter` (only used when strategy is `model`) |
+| `FALLBACK_MODEL_NAME` | `llama-3.1-8b-instant` | Model to call for the `model` strategy |
+| `FALLBACK_MODEL_API_KEY` | _(empty)_ | API key for the model provider (required only for `model` strategy) |
 
 ### CPU-only installation
 
@@ -117,18 +126,33 @@ pip install -r requirements.txt
 Request -> CircuitBreaker.should_allow()
                |
                v
-         FastFilter.check()  --- unsafe ---> block (detector: "fast_filter")
+         FastFilter.check()  --- unsafe ---> block + fallback
                |
              safe
                |
                v
-       DeepClassifier.check() --- unsafe ---> block (detector: "deep_classifier")
+       DeepClassifier.check() --- unsafe ---> block + fallback
                |
              safe
                |
                v
        CircuitBreaker.record_success() -> pass
 ```
+
+Every blocked path (fast filter, deep classifier, or circuit OPEN) attaches a
+safe fallback response via `FallbackRouter`. The caller always receives something
+usable — never a bare rejection.
+
+### Fallback routing
+
+Two strategies, selectable via `FALLBACK_STRATEGY`:
+
+- **`static`** (default) — returns a fixed canned message. Zero cost, zero
+  latency, no API key required. Works out of the box.
+- **`model`** — calls a hosted inference API (Groq or OpenRouter) with a strict
+  system prompt that only knows the request was blocked. The raw unsafe text is
+  never forwarded to the model. Falls back to `static` automatically if the API
+  call fails (timeout, rate limit, network error).
 
 The circuit breaker has zero knowledge of FastAPI. Detectors implement an
 abstract interface (`Detector` base class) so ML-based models can be added

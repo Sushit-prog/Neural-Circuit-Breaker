@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     DEEP_CLASSIFIER_MODEL: str = "protectai/deberta-v3-base-prompt-injection-v2"
     DEEP_CLASSIFIER_THRESHOLD: float = 0.5
 
+    FALLBACK_STRATEGY: str = "static"
+    FALLBACK_STATIC_MESSAGE: str = (
+        "This request could not be processed safely. Please rephrase and try again."
+    )
+    FALLBACK_MODEL_PROVIDER: str = "groq"
+    FALLBACK_MODEL_NAME: str = "llama-3.1-8b-instant"
+    FALLBACK_MODEL_API_KEY: str = ""
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

@@ -13,7 +13,7 @@ from app.core.config import settings
 from app.core.redis_client import get_redis
 from app.detectors.deep_classifier import DeepClassifier
 from app.detectors.fast_filter import FastFilter
-from app.detectors.base import Detector
+from app.routing.fallback_router import FallbackRouter
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +32,41 @@ def get_deep_classifier(request: Request) -> DeepClassifier | None:
     return getattr(request.app.state, "deep_classifier", None)
 
 
+def get_fallback_router(request: Request) -> FallbackRouter:
+    """Return the fallback router from app state."""
+    return request.app.state.fallback_router
+
+
 _fast_filter = FastFilter()
+
+
+async def _blocked_response(
+    request: Request,
+    breaker: CircuitBreaker,
+    circuit_state: CircuitState,
+    detail: str,
+    detector: str | None,
+) -> CheckResponse:
+    """Build a blocked response with a safe fallback message attached."""
+    fallback_router: FallbackRouter = request.app.state.fallback_router
+    fallback = await fallback_router.get_fallback(
+        circuit_id=breaker._cid,
+        original_text="",  # intentionally empty — never echo unsafe text
+        block_reason=detail or "Request blocked",
+    )
+    return CheckResponse(
+        status="blocked",
+        circuit_state=circuit_state.value,
+        detail=detail,
+        detector=detector,
+        fallback=fallback,
+    )
 
 
 @router.post("/check", response_model=CheckResponse)
 async def check_text(
     payload: CheckRequest,
+    request: Request,
     redis: aioredis.Redis = Depends(get_redis),
     fast_filter: FastFilter = Depends(get_fast_filter),
     deep_classifier: DeepClassifier | None = Depends(get_deep_classifier),
@@ -45,11 +74,14 @@ async def check_text(
     """Evaluate *text* through a two-pass detector pipeline, gated by the circuit breaker.
 
     1. Circuit breaker gate (existing logic).
-    2. FastFilter: catches obvious patterns. If flagged → block immediately,
+    2. FastFilter: catches obvious patterns. If flagged -> block immediately,
        do NOT run the deep classifier.
     3. DeepClassifier (if enabled): catches semantic evasion that slips past
-       the regex. If flagged → block.
-    4. Both pass → record success, return pass.
+       the regex. If flagged -> block.
+    4. Both pass -> record success, return pass.
+
+    Every blocked path attaches a safe fallback response so the caller always
+    receives something usable, never a bare rejection.
     """
     breaker = CircuitBreaker(redis, payload.circuit_id, settings)
 
@@ -61,38 +93,32 @@ async def check_text(
 
     if not allowed:
         state = await breaker.get_state()
-        return CheckResponse(
-            status="blocked",
-            circuit_state=state.value,
+        return await _blocked_response(
+            request, breaker, state,
             detail="Circuit is OPEN — requests blocked during cooldown",
+            detector=None,
         )
 
     # Pass 1: fast regex filter
     fast_result = await fast_filter.check(payload.text)
     if not fast_result.is_safe:
         new_state = await breaker.record_failure()
-        return CheckResponse(
-            status="blocked",
-            circuit_state=new_state.value,
+        return await _blocked_response(
+            request, breaker, new_state,
             detail=fast_result.reason,
             detector="fast_filter",
         )
 
     # Pass 2: deep ML classifier (if enabled)
     if deep_classifier is not None:
-        # Fail closed when the classifier was requested but its model isn't
-        # operational.  Silently passing would defeat the purpose of having a
-        # second safety layer — if the infra isn't healthy, block rather than
-        # guess.
         if not deep_classifier.is_ready:
             logger.warning(
                 "Deep classifier enabled but model not ready — "
                 "failing closed on this request"
             )
             new_state = await breaker.record_failure()
-            return CheckResponse(
-                status="blocked",
-                circuit_state=new_state.value,
+            return await _blocked_response(
+                request, breaker, new_state,
                 detail="Deep classifier model not loaded — failing closed",
                 detector="deep_classifier",
             )
@@ -101,18 +127,16 @@ async def check_text(
         except Exception:
             logger.exception("Deep classifier raised unexpectedly — failing closed")
             new_state = await breaker.record_failure()
-            return CheckResponse(
-                status="blocked",
-                circuit_state=new_state.value,
+            return await _blocked_response(
+                request, breaker, new_state,
                 detail="Deep classifier error — failing closed",
                 detector="deep_classifier",
             )
 
         if not deep_result.is_safe:
             new_state = await breaker.record_failure()
-            return CheckResponse(
-                status="blocked",
-                circuit_state=new_state.value,
+            return await _blocked_response(
+                request, breaker, new_state,
                 detail=deep_result.reason,
                 detector="deep_classifier",
             )

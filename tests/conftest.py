@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.core.config import Settings
 from app.core.redis_client import get_redis
+from app.routing.fallback_router import FallbackRouter
 
 
 @pytest_asyncio.fixture
@@ -47,6 +48,13 @@ async def test_client(fake_redis: fakeredis.aioredis.FakeRedis) -> AsyncIterator
 
     async def _override_get_redis() -> fakeredis.aioredis.FakeRedis:
         return fake_redis
+
+    # Ensure fallback router is on app.state (normally set in lifespan)
+    if not hasattr(app.state, "fallback_router") or app.state.fallback_router is None:
+        app.state.fallback_router = FallbackRouter(
+            strategy="static",
+            static_message="Test fallback message",
+        )
 
     app.dependency_overrides[get_redis] = _override_get_redis
     transport = ASGITransport(app=app)

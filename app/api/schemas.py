@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.routing.schemas import FallbackResponse
+
 
 class CheckRequest(BaseModel):
     """Payload for POST /v1/check."""
@@ -21,6 +23,7 @@ class CheckResponse(BaseModel):
     circuit_state: str
     detail: str | None = None
     detector: Literal["fast_filter", "deep_classifier", None] = None
+    fallback: FallbackResponse | None = None
 
 
 class CircuitStateResponse(BaseModel):

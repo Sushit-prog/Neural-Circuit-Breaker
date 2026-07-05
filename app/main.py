@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from app.api.routes import router
 from app.core.config import settings
 from app.core.redis_client import close_redis, get_redis
+from app.routing.fallback_router import FallbackRouter
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup: verify Redis, load deep classifier. Shutdown: close Redis."""
+    """Startup: verify Redis, load deep classifier, init fallback router."""
     await get_redis()
 
     # Load deep classifier once at startup (if enabled)
@@ -46,6 +47,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("Deep classifier disabled via DEEP_CLASSIFIER_ENABLED=False")
 
+    # Initialize fallback router
+    app.state.fallback_router = FallbackRouter(
+        strategy=settings.FALLBACK_STRATEGY,
+        static_message=settings.FALLBACK_STATIC_MESSAGE,
+        model_provider=settings.FALLBACK_MODEL_PROVIDER,
+        model_name=settings.FALLBACK_MODEL_NAME,
+        model_api_key=settings.FALLBACK_MODEL_API_KEY,
+    )
+    logger.info("Fallback router initialized (strategy=%s)", settings.FALLBACK_STRATEGY)
+
     yield
 
     await close_redis()
@@ -54,7 +65,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="Neural Circuit Breaker",
     description="Circuit-breaker state machine for LLM safety",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
