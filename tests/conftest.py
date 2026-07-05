@@ -35,6 +35,7 @@ async def test_client(fake_redis: fakeredis.aioredis.FakeRedis) -> AsyncIterator
         CIRCUIT_FAILURE_THRESHOLD=3,
         CIRCUIT_WINDOW_SECONDS=10,
         CIRCUIT_COOLDOWN_SECONDS=1,
+        DEEP_CLASSIFIER_ENABLED=False,
     )
 
     # Patch the settings object so routes + circuit breaker pick them up

@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     CIRCUIT_WINDOW_SECONDS: int = 60
     CIRCUIT_COOLDOWN_SECONDS: int = 30
 
+    DEEP_CLASSIFIER_ENABLED: bool = True
+    DEEP_CLASSIFIER_MODEL: str = "protectai/deberta-v3-base-prompt-injection-v2"
+    DEEP_CLASSIFIER_THRESHOLD: float = 0.5
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

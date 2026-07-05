@@ -5,32 +5,51 @@ from __future__ import annotations
 import logging
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.schemas import CheckRequest, CheckResponse, CircuitStateResponse
 from app.core.circuit_breaker import CircuitBreaker, CircuitState
 from app.core.config import settings
 from app.core.redis_client import get_redis
+from app.detectors.deep_classifier import DeepClassifier
 from app.detectors.fast_filter import FastFilter
+from app.detectors.base import Detector
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
-_detector = FastFilter()
+
+def get_fast_filter() -> FastFilter:
+    """Return the singleton fast filter instance."""
+    return _fast_filter
+
+
+def get_deep_classifier(request: Request) -> DeepClassifier | None:
+    """Return the deep classifier from app state, or None if disabled."""
+    if not settings.DEEP_CLASSIFIER_ENABLED:
+        return None
+    return getattr(request.app.state, "deep_classifier", None)
+
+
+_fast_filter = FastFilter()
 
 
 @router.post("/check", response_model=CheckResponse)
 async def check_text(
     payload: CheckRequest,
     redis: aioredis.Redis = Depends(get_redis),
+    fast_filter: FastFilter = Depends(get_fast_filter),
+    deep_classifier: DeepClassifier | None = Depends(get_deep_classifier),
 ) -> CheckResponse:
-    """Evaluate *text* against the detector, gated by the circuit breaker.
+    """Evaluate *text* through a two-pass detector pipeline, gated by the circuit breaker.
 
-    1. If the circuit is OPEN and cooldown hasn't expired, reject immediately
-       (the whole point of the breaker — no detector work is done).
-    2. Otherwise run the fast filter.
-    3. Record the outcome and return the new state.
+    1. Circuit breaker gate (existing logic).
+    2. FastFilter: catches obvious patterns. If flagged → block immediately,
+       do NOT run the deep classifier.
+    3. DeepClassifier (if enabled): catches semantic evasion that slips past
+       the regex. If flagged → block.
+    4. Both pass → record success, return pass.
     """
     breaker = CircuitBreaker(redis, payload.circuit_id, settings)
 
@@ -48,16 +67,59 @@ async def check_text(
             detail="Circuit is OPEN — requests blocked during cooldown",
         )
 
-    result = await _detector.check(payload.text)
-
-    if result.is_safe:
-        new_state = await breaker.record_success()
-    else:
+    # Pass 1: fast regex filter
+    fast_result = await fast_filter.check(payload.text)
+    if not fast_result.is_safe:
         new_state = await breaker.record_failure()
+        return CheckResponse(
+            status="blocked",
+            circuit_state=new_state.value,
+            detail=fast_result.reason,
+            detector="fast_filter",
+        )
 
-    if result.is_safe:
-        return CheckResponse(status="pass", circuit_state=new_state.value, detail=None)
-    return CheckResponse(status="blocked", circuit_state=new_state.value, detail=result.reason)
+    # Pass 2: deep ML classifier (if enabled)
+    if deep_classifier is not None:
+        # Fail closed when the classifier was requested but its model isn't
+        # operational.  Silently passing would defeat the purpose of having a
+        # second safety layer — if the infra isn't healthy, block rather than
+        # guess.
+        if not deep_classifier.is_ready:
+            logger.warning(
+                "Deep classifier enabled but model not ready — "
+                "failing closed on this request"
+            )
+            new_state = await breaker.record_failure()
+            return CheckResponse(
+                status="blocked",
+                circuit_state=new_state.value,
+                detail="Deep classifier model not loaded — failing closed",
+                detector="deep_classifier",
+            )
+        try:
+            deep_result = await deep_classifier.check(payload.text)
+        except Exception:
+            logger.exception("Deep classifier raised unexpectedly — failing closed")
+            new_state = await breaker.record_failure()
+            return CheckResponse(
+                status="blocked",
+                circuit_state=new_state.value,
+                detail="Deep classifier error — failing closed",
+                detector="deep_classifier",
+            )
+
+        if not deep_result.is_safe:
+            new_state = await breaker.record_failure()
+            return CheckResponse(
+                status="blocked",
+                circuit_state=new_state.value,
+                detail=deep_result.reason,
+                detector="deep_classifier",
+            )
+
+    # Both layers passed
+    new_state = await breaker.record_success()
+    return CheckResponse(status="pass", circuit_state=new_state.value, detail=None)
 
 
 @router.get("/circuit/{circuit_id}/state", response_model=CircuitStateResponse)

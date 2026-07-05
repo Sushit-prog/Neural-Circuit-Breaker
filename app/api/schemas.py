@@ -20,6 +20,7 @@ class CheckResponse(BaseModel):
     status: Literal["pass", "blocked"]
     circuit_state: str
     detail: str | None = None
+    detector: Literal["fast_filter", "deep_classifier", None] = None
 
 
 class CircuitStateResponse(BaseModel):
