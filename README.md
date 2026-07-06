@@ -98,6 +98,8 @@ isolation. It surfaced through manual testing that exercised the full HTTP
 stack with concurrent clients — a reminder that integration-level concurrency
 bugs often hide behind correct unit-level logic.
 
+https://github.com/user-attachments/assets/8750c4e7-7936-4198-9e0d-27ef547ae191
+
 ## Setup
 
 The verified working path is native Python on WSL (not Docker — see Known
