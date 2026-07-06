@@ -67,7 +67,7 @@ timing, but representative of what a real client observes.
 
 | Layer | Cold start | Warm steady-state |
 |---|---|---|
-| Fast filter (regex match) | <1ms | ~15-17ms |
+| Fast filter (regex match) | N/A (no model loading required) | ~15-17ms |
 | Deep classifier (DeBERTa on CPU) | ~5.2s (one-time, first inference only) | ~420-460ms |
 
 The deep classifier cold start happens once per process lifetime on the first
@@ -241,7 +241,9 @@ All settings are loaded from `.env` (see `.env.example`):
 ## Known Limitations / Path to Production
 
 - **Deep classifier latency on CPU (~450ms)** exceeds a production <50ms
-  budget. GPU inference (same DeBERTa model on CUDA, ~30-50ms) or a hosted
+  budget. GPU inference (same DeBERTa model on CUDA — estimated ~30-50ms based
+  on community benchmarks for this model class, not verified on this project's
+  hardware) or a hosted
   inference endpoint (HuggingFace Inference API, Triton server) would close
   this gap. The two-tier design already mitigates average-case impact.
 
