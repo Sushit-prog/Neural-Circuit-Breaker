@@ -47,6 +47,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("Deep classifier disabled via DEEP_CLASSIFIER_ENABLED=False")
 
+    # Initialize moderation detector (third pass, hosted API — optional)
+    app.state.moderation_detector = None
+    if settings.MODERATION_DETECTOR_ENABLED:
+        from app.detectors.moderation_detector import ModerationDetector
+
+        app.state.moderation_detector = ModerationDetector(settings)
+        if app.state.moderation_detector.is_ready:
+            logger.info("Moderation detector initialized and ready")
+        else:
+            logger.error(
+                "Moderation detector enabled but not ready (missing API key) — "
+                "requests will skip this pass and fail closed if they reach it"
+            )
+    else:
+        logger.info("Moderation detector disabled via MODERATION_DETECTOR_ENABLED=False")
+
     # Initialize fallback router
     app.state.fallback_router = FallbackRouter(
         strategy=settings.FALLBACK_STRATEGY,

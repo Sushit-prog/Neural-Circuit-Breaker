@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.core.redis_client import get_redis
 from app.detectors.deep_classifier import DeepClassifier
 from app.detectors.fast_filter import FastFilter
+from app.detectors.moderation_detector import ModerationDetector
 from app.routing.fallback_router import FallbackRouter
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,13 @@ def get_deep_classifier(request: Request) -> DeepClassifier | None:
     if not settings.DEEP_CLASSIFIER_ENABLED:
         return None
     return getattr(request.app.state, "deep_classifier", None)
+
+
+def get_moderation_detector(request: Request) -> ModerationDetector | None:
+    """Return the moderation detector from app state, or None if disabled."""
+    if not settings.MODERATION_DETECTOR_ENABLED:
+        return None
+    return getattr(request.app.state, "moderation_detector", None)
 
 
 def get_fallback_router(request: Request) -> FallbackRouter:
@@ -70,6 +78,7 @@ async def check_text(
     redis: aioredis.Redis = Depends(get_redis),
     fast_filter: FastFilter = Depends(get_fast_filter),
     deep_classifier: DeepClassifier | None = Depends(get_deep_classifier),
+    moderation_detector: ModerationDetector | None = Depends(get_moderation_detector),
 ) -> CheckResponse:
     """Evaluate *text* through a two-pass detector pipeline, gated by the circuit breaker.
 
@@ -141,7 +150,39 @@ async def check_text(
                 detector="deep_classifier",
             )
 
-    # Both layers passed
+    # Pass 3: hosted moderation API (if enabled)
+    if moderation_detector is not None:
+        if not moderation_detector.is_ready:
+            logger.warning(
+                "Moderation detector enabled but not ready (missing API key) — "
+                "failing closed on this request"
+            )
+            new_state = await breaker.record_failure()
+            return await _blocked_response(
+                request, breaker, new_state,
+                detail="Moderation detector not configured — failing closed",
+                detector="moderation",
+            )
+        try:
+            moderation_result = await moderation_detector.check(payload.text)
+        except Exception:
+            logger.exception("Moderation detector raised unexpectedly — failing closed")
+            new_state = await breaker.record_failure()
+            return await _blocked_response(
+                request, breaker, new_state,
+                detail="Moderation detector error — failing closed",
+                detector="moderation",
+            )
+
+        if not moderation_result.is_safe:
+            new_state = await breaker.record_failure()
+            return await _blocked_response(
+                request, breaker, new_state,
+                detail=moderation_result.reason,
+                detector="moderation",
+            )
+
+    # All layers passed
     new_state = await breaker.record_success()
     return CheckResponse(status="pass", circuit_state=new_state.value, detail=None)
 

@@ -9,6 +9,11 @@ detector entirely, returning a safe fallback response without the latency cost o
 inference. This is real-time detection with graceful degradation, not just a
 wrapper around a model.
 
+Detection runs through three independent, pluggable passes — a regex fast
+filter, a local ML classifier (DeBERTa), and an optional hosted moderation
+API — each implementing the same `Detector` interface, so any pass can be
+swapped or extended without touching the circuit breaker or API layer.
+
 ## Architecture
 
 ```
@@ -39,10 +44,18 @@ wrapper around a model.
                    └───────────┘  └─────┬───────────┬───────┘
                               unsafe    │           │ safe
                                         │           │
-                               ┌────────▼──┐  ┌─────▼─────────────┐
-                               │ Block +   │  │ record_success()   │
-                               │ Fallback  │  │ -> pass            │
-                               └───────────┘  └───────────────────┘
+                               ┌────────▼──┐  ┌─────▼──────────────────┐
+                               │ Block +   │  │ ModerationDetector      │
+                               │ Fallback  │  │ .check() (hosted API,   │
+                               └───────────┘  │ optional, off by        │
+                                              │ default)                │
+                                              └─────┬───────────┬───────┘
+                                          unsafe    │           │ safe
+                                                    │           │
+                                           ┌────────▼──┐  ┌─────▼─────────────┐
+                                           │ Block +   │  │ record_success()   │
+                                           │ Fallback  │  │ -> pass            │
+                                           └───────────┘  └───────────────────┘
 ```
 
 Every blocked path (circuit OPEN, fast filter match, deep classifier flag)
@@ -56,7 +69,7 @@ receives something usable — never a bare rejection.
 | WATCH/MULTI for state transitions | Eliminates read-then-write races under concurrent requests; two workers can't both claim the HALF_OPEN probe slot |
 | Fail-closed on Redis loss | If the state store is unreachable, the system blocks rather than silently allowing potentially unsafe content through |
 | Fail-closed on model load failure | DeepClassifier exposes `is_ready`; routes check it explicitly and block with a 503-class response if the model didn't load |
-| Two-tier detection (regex then ML) | Regex catches obvious patterns in <15ms; ML only runs on the subset that slips past, keeping average-case latency low |
+| Three-tier detection (regex, ML, hosted API) | Regex catches obvious patterns in <15ms; ML runs on the subset that slips past; an optional hosted moderation API runs last, gated off by default so latency-sensitive deployments can skip it |
 | Fallback never receives raw unsafe text | Only the block reason and circuit ID are sent to the fallback model, preventing re-injection through the fallback path itself |
 
 ## Performance
@@ -73,10 +86,11 @@ timing, but representative of what a real client observes.
 The deep classifier cold start happens once per process lifetime on the first
 inference call — not per-request. Subsequent requests use the warmed model.
 
-The two-tier design keeps average-case latency practical: the fast filter
+The three-tier design keeps average-case latency practical: the fast filter
 handles the majority of obvious jailbreak attempts and short-circuits before
 the deep classifier runs. The ~450ms ML inference is reserved for the subset
-of requests where regex alone isn't sufficient.
+of requests where regex alone isn't sufficient. The optional hosted moderation
+API runs last and is gated off by default.
 
 ## Engineering Highlight: The HALF_OPEN Race Condition
 
@@ -202,7 +216,7 @@ Evaluate text through the circuit breaker and detector pipeline.
 | `status` | `"pass"` \| `"blocked"` | Whether the request was allowed |
 | `circuit_state` | string | Current circuit state: `CLOSED`, `OPEN`, or `HALF_OPEN` |
 | `detail` | string \| null | Human-readable reason for the decision |
-| `detector` | `"fast_filter"` \| `"deep_classifier"` \| null | Which layer made the block decision |
+| `detector` | `"fast_filter"` \| `"deep_classifier"` \| `"moderation"` \| null | Which layer made the block decision |
 | `fallback` | object \| null | Safe fallback message (only present when `status` is `"blocked"`) |
 
 ### GET /v1/circuit/{circuit_id}/state
@@ -234,6 +248,8 @@ All settings are loaded from `.env` (see `.env.example`):
 | `DEEP_CLASSIFIER_ENABLED` | `True` | Enable ML classifier (`False` for fast-filter-only) |
 | `DEEP_CLASSIFIER_MODEL` | `protectai/deberta-v3-base-prompt-injection-v2` | HuggingFace model ID |
 | `DEEP_CLASSIFIER_THRESHOLD` | `0.5` | Score above this = unsafe |
+| `MODERATION_DETECTOR_ENABLED` | `False` | Enable the hosted moderation API pass (off by default) |
+| `MODERATION_API_KEY` | *(empty)* | OpenAI API key for the moderation endpoint (required if enabled) |
 | `FALLBACK_STRATEGY` | `static` | `static` (fixed message) or `model` (Groq/OpenRouter) |
 | `FALLBACK_STATIC_MESSAGE` | _(safe default)_ | Message returned when strategy is `static` |
 | `FALLBACK_MODEL_PROVIDER` | `groq` | `groq` or `openrouter` (only for `model` strategy) |
@@ -247,7 +263,7 @@ All settings are loaded from `.env` (see `.env.example`):
   on community benchmarks for this model class, not verified on this project's
   hardware) or a hosted
   inference endpoint (HuggingFace Inference API, Triton server) would close
-  this gap. The two-tier design already mitigates average-case impact.
+  this gap. The three-tier design already mitigates average-case impact.
 
 - **`FALLBACK_STRATEGY=model`** is implemented and unit-tested against mocked
   API responses, but was not verified against live Groq/OpenRouter calls during

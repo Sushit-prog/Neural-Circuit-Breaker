@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     DEEP_CLASSIFIER_MODEL: str = "protectai/deberta-v3-base-prompt-injection-v2"
     DEEP_CLASSIFIER_THRESHOLD: float = 0.5
 
+    MODERATION_DETECTOR_ENABLED: bool = False
+    MODERATION_API_KEY: str = ""
+
     FALLBACK_STRATEGY: str = "static"
     FALLBACK_STATIC_MESSAGE: str = (
         "This request could not be processed safely. Please rephrase and try again."
